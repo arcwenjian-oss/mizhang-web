@@ -34,13 +34,71 @@ function cleanOldData() {
   return 0;
 }
 
-// ========== 云同步（jsonbin.io）==========
-const BIN_ID = '6a6a3d9323a2f6593e59dc14';
-const API_KEY = '$2a$10$dwRcP8OPDwelVA8FFHgsi.8FwzCnxdbvBNdh91vtxmu7NMonFoDtC';
-const BIN_URL = `https://api.jsonbin.io/v3/b/${BIN_ID}`;
+// ========== 云同步（GitHub Gist）==========
+const GIST_API = 'https://api.github.com/gists';
 let syncTimer = null;
+let gistId = localStorage.getItem('mz_gist_id') || '';
+let syncToken = localStorage.getItem('mz_sync_token') || '';
+let syncKey = localStorage.getItem('mz_sync_key') || '';
+
+function isSyncEnabled() {
+  return !!(gistId && syncToken);
+}
+
+async function initSyncGist() {
+  if (!syncToken || !syncKey) return;
+  // 验证已有的 gistId 是否有效
+  if (gistId) {
+    try {
+      const res = await fetch(`${GIST_API}/${gistId}`, {
+        headers: { 'Authorization': `token ${syncToken}` },
+      });
+      if (res.ok) return;
+    } catch (e) {}
+  }
+  // 查找已有的 gist
+  try {
+    const res = await fetch(`${GIST_API}?per_page=100`, {
+      headers: { 'Authorization': `token ${syncToken}` },
+    });
+    if (res.ok) {
+      const gists = await res.json();
+      const found = gists.find(g => g.description === `mizhang-sync-${syncKey}`);
+      if (found) {
+        gistId = found.id;
+        localStorage.setItem('mz_gist_id', gistId);
+        return;
+      }
+    }
+  } catch (e) {}
+  // 创建新的 gist
+  try {
+    const res = await fetch(GIST_API, {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${syncToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        description: `mizhang-sync-${syncKey}`,
+        public: false,
+        files: {
+          'mizhang-data.json': {
+            content: JSON.stringify({ updatedAt: Date.now() })
+          }
+        }
+      }),
+    });
+    if (res.ok) {
+      const gist = await res.json();
+      gistId = gist.id;
+      localStorage.setItem('mz_gist_id', gistId);
+    }
+  } catch (e) {}
+}
 
 async function syncUpload() {
+  if (!isSyncEnabled()) return;
   try {
     const data = {
       transactions: load(STORAGE_KEYS.tx),
@@ -51,13 +109,19 @@ async function syncUpload() {
       user: loadObj(STORAGE_KEYS.user),
       updatedAt: Date.now(),
     };
-    await fetch(BIN_URL, {
-      method: 'PUT',
+    await fetch(`${GIST_API}/${gistId}`, {
+      method: 'PATCH',
       headers: {
+        'Authorization': `token ${syncToken}`,
         'Content-Type': 'application/json',
-        'X-Access-Key': API_KEY,
       },
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        files: {
+          'mizhang-data.json': {
+            content: JSON.stringify(data)
+          }
+        }
+      }),
     });
     showSyncStatus('✓ 已同步', '#7BC47F');
   } catch (e) {
@@ -65,27 +129,49 @@ async function syncUpload() {
   }
 }
 
+function mergeById(storageKey, cloudItems, idKey = 'id') {
+  if (!cloudItems || !cloudItems.length) return;
+  const localItems = load(storageKey);
+  const map = new Map();
+  localItems.forEach(item => map.set(item[idKey], item));
+  cloudItems.forEach(item => {
+    const local = map.get(item[idKey]);
+    if (!local || (item.updatedAt || 0) > (local.updatedAt || 0)) {
+      map.set(item[idKey], item);
+    }
+  });
+  save(storageKey, Array.from(map.values()));
+}
+
 async function syncDownload() {
+  if (!isSyncEnabled()) return;
   try {
-    const res = await fetch(BIN_URL + '/latest', {
-      headers: { 'X-Access-Key': API_KEY },
+    const res = await fetch(`${GIST_API}/${gistId}`, {
+      headers: { 'Authorization': `token ${syncToken}` },
     });
     if (!res.ok) return;
-    const json = await res.json();
-    const data = json.record;
+    const gist = await res.json();
+    const file = gist.files['mizhang-data.json'];
+    if (!file || !file.content) return;
+    const data = JSON.parse(file.content);
     if (!data || !data.updatedAt) return;
 
-    const localUpdatedAt = localStorage.getItem('mz_sync_time') || 0;
-    if (data.updatedAt > localUpdatedAt) {
-      if (data.transactions) save(STORAGE_KEYS.tx, data.transactions);
-      if (data.accounts) save(STORAGE_KEYS.accounts, data.accounts);
-      if (data.ledgers) save(STORAGE_KEYS.ledgers, data.ledgers);
-      if (data.categories) save(STORAGE_KEYS.categories, data.categories);
-      if (data.budgets) save(STORAGE_KEYS.budgets, data.budgets);
-      if (data.user) saveObj(STORAGE_KEYS.user, data.user);
-      localStorage.setItem('mz_sync_time', data.updatedAt.toString());
-      showSyncStatus('✓ 已更新', '#7BC47F');
+    // 智能合并：按 id 去重，保留更新的记录
+    mergeById(STORAGE_KEYS.tx, data.transactions, 'id');
+    mergeById(STORAGE_KEYS.accounts, data.accounts, 'id');
+    mergeById(STORAGE_KEYS.ledgers, data.ledgers, 'id');
+    mergeById(STORAGE_KEYS.categories, data.categories, 'id');
+    mergeById(STORAGE_KEYS.budgets, data.budgets, 'id');
+
+    if (data.user) {
+      const localUser = loadObj(STORAGE_KEYS.user);
+      if (!localUser || (data.user.updatedAt || 0) > (localUser.updatedAt || 0)) {
+        saveObj(STORAGE_KEYS.user, data.user);
+      }
     }
+
+    localStorage.setItem('mz_sync_time', data.updatedAt.toString());
+    showSyncStatus('✓ 已更新', '#7BC47F');
   } catch (e) {
     // 静默失败，不影响本地使用
   }
@@ -1784,6 +1870,61 @@ function deleteBudget(id) {
   toast('已删除');
 }
 
+// ========== 云同步设置 ==========
+function openSyncDialog() {
+  document.getElementById('modalContent').innerHTML = `
+    <div class="modal-handle"></div>
+    <div class="modal-title">云同步 💫</div>
+    <div style="font-size:12px;color:var(--text-2);margin-bottom:12px;line-height:1.5">
+      两台手机输入同一个<b>同步密钥</b>，就能自动同步账单。<br>
+      密钥可以是手机号、情侣暗号等任意文字。
+    </div>
+    <div class="section-label">GitHub Token</div>
+    <input class="field-input" id="syncTokenInput" placeholder="ghp_xxxxxxxx" value="${syncToken}" style="margin-bottom:12px">
+    <div style="font-size:11px;color:var(--text-3);margin-bottom:12px">
+      Token 只存在本机，不上传。获取方式：GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → 勾选 gist 权限
+    </div>
+    <div class="section-label">同步密钥</div>
+    <input class="field-input" id="syncKeyInput" placeholder="例如：老婆手机号" value="${syncKey}" style="margin-bottom:12px">
+    <button class="btn-primary" onclick="saveSyncConfig()">保存并开启</button>
+    <button class="btn-outline" onclick="closeModal()">取消</button>
+    ${isSyncEnabled() ? `<button class="btn-outline" onclick="disableSync();closeModal();renderSettings();toast('已关闭同步')" style="margin-top:8px;color:var(--warning);border-color:var(--warning)">关闭同步</button>` : ''}
+  `;
+  document.getElementById('modalOverlay').classList.add('show');
+}
+
+async function saveSyncConfig() {
+  const token = document.getElementById('syncTokenInput').value.trim();
+  const key = document.getElementById('syncKeyInput').value.trim();
+  if (!token) { toast('请输入 GitHub Token'); return; }
+  if (!key) { toast('请输入同步密钥'); return; }
+
+  syncToken = token;
+  syncKey = key;
+  localStorage.setItem('mz_sync_token', token);
+  localStorage.setItem('mz_sync_key', key);
+
+  toast('正在初始化同步... 🌸');
+  await initSyncGist();
+  if (gistId) {
+    await syncDownload();
+    closeModal();
+    renderSettings();
+    toast('云同步已开启！☁️');
+  } else {
+    toast('初始化失败，请检查 Token 和密钥');
+  }
+}
+
+function disableSync() {
+  localStorage.removeItem('mz_sync_token');
+  localStorage.removeItem('mz_sync_key');
+  localStorage.removeItem('mz_gist_id');
+  syncToken = '';
+  syncKey = '';
+  gistId = '';
+}
+
 // ========== 设置页面 ==========
 function renderSettings() {
   const user = getUser();
@@ -1802,6 +1943,25 @@ function renderSettings() {
         <div style="font-size:13px;opacity:0.8">蜜账用户 🌸</div>
       </div>
       <button onclick="editUserDialog()" style="background:rgba(255,255,255,0.2);border:none;color:white;border-radius:50%;width:36px;height:36px;font-size:16px;cursor:pointer">✏️</button>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-section-title">云同步 💫</div>
+      <div class="settings-group">
+        <div class="settings-item" onclick="openSyncDialog()">
+          <span class="settings-icon">${isSyncEnabled() ? '☁️' : '⛅'}</span>
+          <div class="settings-text">
+            <div class="settings-label">${isSyncEnabled() ? '云同步已开启' : '开启云同步'}</div>
+            <div class="settings-sub">${isSyncEnabled() ? `密钥：${syncKey}` : '多台手机实时同步账单'}</div>
+          </div>
+          <span style="color:var(--text-3)">›</span>
+        </div>
+        ${isSyncEnabled() ? `<div class="settings-item" onclick="syncDownload();renderSettings();toast('手动同步完成 🌸')">
+          <span class="settings-icon">🔄</span>
+          <div class="settings-text"><div class="settings-label">立即同步</div><div class="settings-sub">拉取最新云端数据</div></div>
+          <span style="color:var(--text-3)">›</span>
+        </div>` : ''}
+      </div>
     </div>
 
     <div class="settings-section">
@@ -1930,13 +2090,25 @@ function init() {
 
   ensureInit();
   state.currentLedger = loadObj(STORAGE_KEYS.currentLedger) || 'ledger_default';
-  syncDownload();
+
+  // 初始化云同步（如果已配置）
+  initSyncGist().then(() => {
+    syncDownload();
+  });
+
   const removed = cleanOldData();
   if (removed > 0) debounceSync();
   renderHome();
   setTimeout(() => document.getElementById('loadingScreen').classList.add('hide'), 300);
-  // 每 30 秒自动拉取最新数据
-  setInterval(syncDownload, 30000);
+
+  // 每 15 秒自动拉取云端最新数据（准实时同步）
+  setInterval(syncDownload, 15000);
+
+  // 页面从后台切回前台时立即同步
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) syncDownload();
+  });
+
   // 每天清理一次过期数据
   setInterval(cleanOldData, 24 * 60 * 60 * 1000);
 }
