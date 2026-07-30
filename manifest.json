@@ -1,0 +1,16 @@
+{
+  "name": "蜜账 - 可爱记账",
+  "short_name": "蜜账",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#FFF8FA",
+  "theme_color": "#FF8FA3",
+  "description": "可爱清新的情侣共享记账 App",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
